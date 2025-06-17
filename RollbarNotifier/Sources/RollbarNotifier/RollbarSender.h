@@ -14,8 +14,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface RollbarSender : NSObject
 
-- (nullable RollbarPayloadPostReply *)sendPayload:(nonnull NSData *)payload
-                                      usingConfig:(nonnull RollbarConfig *)config;
+- (void)sendPayload:(nonnull NSData *)payload
+        usingConfig:(nonnull RollbarConfig *)config
+         completion:(void (^)(RollbarPayloadPostReply * _Nullable response))completion;
 @end
 
 NS_ASSUME_NONNULL_END

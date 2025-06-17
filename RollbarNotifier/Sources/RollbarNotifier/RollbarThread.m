@@ -98,19 +98,24 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
 
 - (void)run {
     @autoreleasepool {
-        _timer = [NSTimer timerWithTimeInterval:60.0 / _maxReportsPerMinute
-                                         target:self
-                                       selector:@selector(checkItems)
-                                       userInfo:nil
-                                        repeats:YES];
+        [self startTimer];
         
         NSRunLoop *runLoop = [NSRunLoop currentRunLoop];
-        [runLoop addTimer:_timer forMode:NSDefaultRunLoopMode];
-        
         while (self.active) {
             [runLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]];
         }
     }
+}
+
+- (void)startTimer {
+    _timer = [NSTimer timerWithTimeInterval:60.0 / _maxReportsPerMinute
+                                     target:self
+                                   selector:@selector(checkItems)
+                                   userInfo:nil
+                                    repeats:NO];
+    
+    NSRunLoop *runLoop = [NSRunLoop currentRunLoop];
+    [runLoop addTimer:_timer forMode:NSDefaultRunLoopMode];
 }
 
 #pragma mark - persisting payload items
@@ -385,16 +390,25 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
 #pragma mark - processing persisted payload items
 
 - (void)checkItems {
+    RBLog(@"Check items called");
+    if (_timer) {
+        [_timer invalidate];
+        _timer = nil;
+    }
     if (self.cancelled) {
-        if (_timer) {
-            [_timer invalidate];
-            _timer = nil;
-        }
         [NSThread exit];
+        return;
     }
     
     @autoreleasepool {
-        [self processSavedItems];
+        RBLog(@"Processing saved items...");
+        [self processSavedItemsCompletion:^{
+            if (self.cancelled) {
+                [NSThread exit];
+                return;
+            }
+            [self startTimer];
+        }];
     }
 }
 
@@ -430,8 +444,9 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
     return NO;
 }
 
-- (void)processSavedPayload:(nonnull NSDictionary<NSString *, NSString *> *)payloadDataRow {
+- (void)processSavedPayload:(nonnull NSDictionary<NSString *, NSString *> *)payloadDataRow callback:(nonnull void(^)())callback {
     if ([self checkProcessStalePayload:payloadDataRow]) {
+        callback();
         return;
     }
 
@@ -448,6 +463,7 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
             [self removePayloadByID:payloadDataRow[@"id"]];
             RBLog(@"Dropped %@", payload.data.uuid);
         }
+        callback();
         return;
     }
 
@@ -464,14 +480,34 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
             RBErr(@"\tError while generating JSON data: %@", error);
         }
         [self removePayloadByID:payloadDataRow[@"id"]];
+        callback();
         return;
     }
 
-    RollbarTriStateFlag result = RollbarTriStateFlag_On;
     if (config.developerOptions.transmit) {
-        result = [self sendPayload:jsonPayload toDestination:destinationRecord withConfig:config];
+        [self sendPayload:jsonPayload toDestination:destinationRecord withConfig:config callback:^(RollbarTriStateFlag result) {
+            [self handleSendPayloadResult:result
+                               withConfig:config
+                           payloadDataRow:payloadDataRow
+                              jsonPayload:jsonPayload
+                                  payload:payload];
+            callback();
+        }];
+    } else {
+        [self handleSendPayloadResult:RollbarTriStateFlag_On
+                           withConfig:config
+                       payloadDataRow:payloadDataRow
+                          jsonPayload:jsonPayload
+                              payload:payload];
+        callback();
     }
-    
+}
+
+- (void)handleSendPayloadResult:(RollbarTriStateFlag)result
+                     withConfig:(nonnull RollbarConfig *)config
+                 payloadDataRow:(nonnull NSDictionary<NSString *, NSString *> *)payloadDataRow 
+                      jsonPayload:(nonnull NSData *)jsonPayload
+                        payload:(nonnull RollbarPayload *)payload {
     NSString *payloadsLogFile = nil;
 
     switch (result) {
@@ -505,7 +541,7 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
     RBLog([self loggableStringFromPayload:payload result:result]);
 }
 
-- (void)processSavedItems {
+- (void)processSavedItemsCompletion:(void (^)())completion {
 #if !TARGET_OS_WATCH
     if (!self->_isNetworkReachable) {
         RBLog(@"Processing saved items: no network!");
@@ -515,63 +551,79 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
 #endif
 
     NSArray *payloads = [self->_payloadsRepo getPayloadsWithOffset:0 andLimit:5];
-    for (NSDictionary<NSString *, NSString *> *payload in payloads) {
+    __block NSUInteger index = 0;
+    __weak typeof(self) weakSelf = self;
+    __block void (^processNext)(); // __block for self-reference
+    processNext = ^{
+        if (index >= payloads.count) {
+            completion();
+            processNext = nil; // clear the reference to avoid retain cycle
+            return;
+        }
+        RBLog(@"Processing next payload: %ld", (long)index);
+        NSDictionary<NSString *, NSString *> *payload = payloads[index++];
         @try {
-            [self processSavedPayload:payload];
+            [weakSelf processSavedPayload:payload callback:processNext];
         } @catch (NSException *exception) {
             RBErr(@"Payload processing EXCEPTION: %@", exception);
+            processNext();
         }
-    }
+    };
+    processNext();
 }
 
-- (RollbarTriStateFlag)sendPayload:(nonnull NSData *)payload
+- (void)sendPayload:(nonnull NSData *)payload
                         withConfig:(nonnull RollbarConfig *)config
+                          callback:(void(^)(RollbarTriStateFlag))callback
 {
     RollbarDestinationRecord *destination = [self->_registry getRecordForConfig:config];
     if ([destination canPostWithConfig:config]) {
-        return [self sendPayload:payload toDestination:destination withConfig:config];
+        [self sendPayload:payload toDestination:destination withConfig:config callback: callback];
+        return;
     }
-    return RollbarTriStateFlag_None; // nothing obviously wrong with the payload - just can not send at the moment
+    callback(RollbarTriStateFlag_None); // nothing obviously wrong with the payload - just can not send at the moment
 }
 
-- (RollbarTriStateFlag)sendPayload:(nonnull NSData *)payload
+- (void)sendPayload:(nonnull NSData *)payload
                      toDestination:(nullable RollbarDestinationRecord *)record
                         withConfig:(nonnull RollbarConfig *)config
+                          callback:(void(^)(RollbarTriStateFlag))callback
 {
     if (!payload || !config) {
-        return RollbarTriStateFlag_Off; //obviously invalid payload to sent or invalid destination...
+        callback(RollbarTriStateFlag_Off); //obviously invalid payload to sent or invalid destination...
+        return;
     }
 
-    RollbarPayloadPostReply *reply = [[RollbarSender new] sendPayload:payload usingConfig:config];
-    [record recordPostReply:reply withConfig:config];
-    
-    if (!reply) {
-        return RollbarTriStateFlag_None; // nothing obviously wrong with the payload - just there was no deterministic
-                                         // reply from the destination server
-    }
-    
-    switch (reply.statusCode) {
-        case 200: // OK
-            return RollbarTriStateFlag_On; // the payload was successfully transmitted
-        case 401: // unauthorized
-        case 403: // access denied
-        case 404: // not found
-            return RollbarTriStateFlag_None; // worth retrying later
-        case 429: // too many requests
-            switch (self.rateLimitBehavior) {
-                case RollbarRateLimitBehavior_Queue:
-                    return RollbarTriStateFlag_None;
-                case RollbarRateLimitBehavior_Drop:
-                default:
-                    return RollbarTriStateFlag_Off;
-            }
-        case 400: // bad request
-        case 413: // request entity too large
-        case 422: // unprocessable entity
-        default:
-            return RollbarTriStateFlag_Off; // unacceptable request/payload - should be dropped
-
-    }
+    [[RollbarSender new] sendPayload:payload usingConfig:config completion:^(RollbarPayloadPostReply * _Nullable reply) {
+        [record recordPostReply:reply withConfig:config];
+        
+        if (!reply) {
+            callback(RollbarTriStateFlag_None); // nothing obviously wrong with the payload - just there was no deterministic
+            return;                             // reply from the destination server
+        }
+        
+        switch (reply.statusCode) {
+            case 200: // OK
+                callback(RollbarTriStateFlag_On); // the payload was successfully transmitted
+            case 401: // unauthorized
+            case 403: // access denied
+            case 404: // not found
+                callback(RollbarTriStateFlag_None); // worth retrying later
+            case 429: // too many requests
+                switch (self.rateLimitBehavior) {
+                    case RollbarRateLimitBehavior_Queue:
+                        callback(RollbarTriStateFlag_None);
+                    case RollbarRateLimitBehavior_Drop:
+                    default:
+                        callback(RollbarTriStateFlag_Off);
+                }
+            case 400: // bad request
+            case 413: // request entity too large
+            case 422: // unprocessable entity
+            default:
+                callback(RollbarTriStateFlag_Off); // unacceptable request/payload - should be dropped
+        } 
+    }];
 }
 
 #pragma mark - Network telemetry data

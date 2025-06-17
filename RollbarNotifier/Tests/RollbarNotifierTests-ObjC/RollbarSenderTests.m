@@ -53,12 +53,24 @@
     [self sendAndAssertPayload:payload];
 }
 
+- (RollbarPayloadPostReply *)sendData:(NSData *)payloadData using:(RollbarSender *)sender {
+    __block RollbarPayloadPostReply *reply = nil;
+    __block BOOL finished = NO;
+    [sender sendPayload:payloadData usingConfig:[self getConfig_Live_Default] completion:^(RollbarPayloadPostReply * _Nullable response) {
+        reply = response;
+        finished = YES;
+    }];
+    while (!finished) {
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]];
+    }
+    return reply;
+}
+
 - (void)sendAndAssertPayload:(RollbarPayload *)payload {
-    
     NSData *payloadData = [payload serializeToJSONData];
     RollbarSender *sender = [RollbarSender new];
-    RollbarPayloadPostReply *reply = [sender sendPayload:payloadData usingConfig:[self getConfig_Live_Default]];
-    
+
+    RollbarPayloadPostReply * reply = [self sendData:payloadData using:sender];
     XCTAssertNotNil(reply);
 }
 
@@ -80,7 +92,7 @@
     
     [self measureBlock:^{
         // Put the code you want to measure the time of here.
-        RollbarPayloadPostReply *reply = [sender sendPayload:payloadData usingConfig:[self getConfig_Live_Default]];
+        [self sendData:payloadData using:sender];
     }];
 }
 
@@ -92,7 +104,7 @@
     
     [self measureBlock:^{
         // Put the code you want to measure the time of here.
-        RollbarPayloadPostReply *reply = [sender sendPayload:payloadData usingConfig:[self getConfig_Live_Default]];
+        [self sendData:payloadData using:sender];
     }];
 }
 
@@ -104,7 +116,7 @@
     
     [self measureBlock:^{
         // Put the code you want to measure the time of here.
-        RollbarPayloadPostReply *reply = [sender sendPayload:payloadData usingConfig:[self getConfig_Live_Default]];
+        [self sendData:payloadData using:sender];
     }];
 }
 
@@ -117,7 +129,7 @@
     
     [self measureBlock:^{
         // Put the code you want to measure the time of here.
-        RollbarPayloadPostReply *reply = [sender sendPayload:payloadData usingConfig:[self getConfig_Live_Default]];
+        [self sendData:payloadData using:sender];
     }];
 }
 
@@ -128,7 +140,7 @@
     
     [self measureBlock:^{
         // Put the code you want to measure the time of here.
-        RollbarPayloadPostReply *reply = [sender sendPayload:payloadData usingConfig:[self getConfig_Live_Default]];
+        [self sendData:payloadData using:sender];
     }];
 }
 @end

@@ -9,29 +9,28 @@
 
 @implementation RollbarSender
 
-- (nullable RollbarPayloadPostReply *)sendPayload:(nonnull NSData *)payload
+- (void)sendPayload:(nonnull NSData *)payload
                                       usingConfig:(nonnull RollbarConfig *)config
+                                       completion:(void (^)(RollbarPayloadPostReply * _Nullable response))completion
 {
-    RollbarPayloadPostReply *reply;
-
     if (config.developerOptions.transmit) {
-        reply = [self transmitPayload:payload
-                        toDestination:config.destination
-                usingDeveloperOptions:config.developerOptions
-                 andHttpProxySettings:config.httpProxy
-                andHttpsProxySettings:config.httpsProxy];
+        [self transmitPayload:payload
+                toDestination:config.destination
+        usingDeveloperOptions:config.developerOptions
+         andHttpProxySettings:config.httpProxy
+        andHttpsProxySettings:config.httpsProxy
+                   completion:completion];
     } else {
-        reply = [RollbarPayloadPostReply greenReply]; // we just successfully short-circuit here...
+        completion([RollbarPayloadPostReply greenReply]); // we just successfully short-circuit here...
     }
-
-    return reply;
 }
 
-- (nullable RollbarPayloadPostReply *)transmitPayload:(nonnull NSData *)payload
-                                        toDestination:(nonnull RollbarDestination  *)destination
-                                usingDeveloperOptions:(nullable RollbarDeveloperOptions *)developerOptions
-                                 andHttpProxySettings:(nullable RollbarProxy *)httpProxySettings
-                                andHttpsProxySettings:(nullable RollbarProxy *)httpsProxySettings
+- (void)transmitPayload:(nonnull NSData *)payload
+          toDestination:(nonnull RollbarDestination  *)destination
+  usingDeveloperOptions:(nullable RollbarDeveloperOptions *)developerOptions
+   andHttpProxySettings:(nullable RollbarProxy *)httpProxySettings
+  andHttpsProxySettings:(nullable RollbarProxy *)httpsProxySettings
+             completion:(void (^)(RollbarPayloadPostReply * _Nullable response))completion
 {
     NSAssert(payload, @"The payload must be initialized!");
     NSAssert(destination, @"The destination must be initialized!");
@@ -42,21 +41,24 @@
     httpProxySettings = httpProxySettings ?: [RollbarProxy new];
     httpsProxySettings = httpsProxySettings ?: [RollbarProxy new];
 
-    NSHTTPURLResponse *response = [self postPayload:payload
-                                      toDestination:destination
-                              usingDeveloperOptions:developerOptions
-                               andHttpProxySettings:httpProxySettings
-                              andHttpsProxySettings:httpsProxySettings];
-
-    return [RollbarPayloadPostReply replyFromHttpResponse:response];
+    [self postPayload:payload
+        toDestination:destination
+usingDeveloperOptions:developerOptions
+ andHttpProxySettings:httpProxySettings
+andHttpsProxySettings:httpsProxySettings
+           completion:^(NSHTTPURLResponse *response) {
+        completion([RollbarPayloadPostReply replyFromHttpResponse:response]);
+    }];
 }
 
-- (nullable NSHTTPURLResponse *)postPayload:(nonnull NSData *)payload
-                              toDestination:(nonnull RollbarDestination  *)destination
-                      usingDeveloperOptions:(nonnull RollbarDeveloperOptions *)developerOptions
-                       andHttpProxySettings:(nonnull RollbarProxy *)httpProxySettings
-                      andHttpsProxySettings:(nonnull RollbarProxy *)httpsProxySettings
+- (void)  postPayload:(nonnull NSData *)payload
+        toDestination:(nonnull RollbarDestination  *)destination
+usingDeveloperOptions:(nonnull RollbarDeveloperOptions *)developerOptions
+ andHttpProxySettings:(nonnull RollbarProxy *)httpProxySettings
+andHttpsProxySettings:(nonnull RollbarProxy *)httpsProxySettings
+           completion:(void (^)(NSHTTPURLResponse * _Nullable response))completion
 {
+    NSThread *callingThread = [NSThread currentThread];
     NSURL *url = [NSURL URLWithString:destination.endpoint];
     if (url == nil) {
         RBLog(@"The destination endpoint URL is malformed: %@", destination.endpoint);
@@ -68,10 +70,6 @@
     [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     [request setValue:destination.accessToken forHTTPHeaderField:@"X-Rollbar-Access-Token"];
     [request setHTTPBody:payload];
-
-    __block NSHTTPURLResponse *httpResponse = nil;
-
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
 
     NSURLSession *session = [NSURLSession sharedSession];
 
@@ -93,15 +91,31 @@
     RBLog(@"\tSending payload...");
     NSURLSessionDataTask *dataTask = [session dataTaskWithRequest:request
                                                 completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        httpResponse = [self checkPayloadResponse:response error:error];
-        dispatch_semaphore_signal(sem);
+        NSHTTPURLResponse *httpResponse = [self checkPayloadResponse:response error:error];
+        if (completion) {
+            NSDictionary *args = @{ 
+                @"response": httpResponse ?: [NSNull null], 
+                @"completion": [completion copy] 
+            };
+            [self performSelector:@selector(callCompletionOnOriginalThread:)
+                         onThread:callingThread
+                       withObject:args
+                    waitUntilDone:NO];
+        }
     }];
 
     [dataTask resume];
+}
 
-    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
-
-    return httpResponse;
+- (void)callCompletionOnOriginalThread:(NSDictionary *)args {
+    NSHTTPURLResponse *response = args[@"response"];
+    void (^completion)(NSHTTPURLResponse *) = args[@"completion"];
+    if ([response isKindOfClass:[NSNull class]]) {
+        response = nil;
+    }
+    if (completion) {
+        completion(response);
+    }
 }
 
 - (nullable NSHTTPURLResponse *)checkPayloadResponse:(NSURLResponse *)response error:(NSError *)error {
