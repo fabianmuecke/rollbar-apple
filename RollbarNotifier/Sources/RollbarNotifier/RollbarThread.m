@@ -31,6 +31,8 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
     RollbarReachability *_reachability;
     BOOL _isNetworkReachable;
 #endif
+    NSMutableArray<id<RollbarCancellable>> *_pendingSendOperations;
+    NSObject *_pendingSendOperationsLock;
 }
 
 - (instancetype)initWithTarget:(id)target
@@ -42,10 +44,11 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
                           object:nil];
     if (self) {
         [self setupDataStorage];
-        
         self->_maxReportsPerMinute = 240;
         self->_payloadLifetimeInSeconds = DEFAULT_PAYLOAD_LIFETIME_SECONDS;
         self->_registry = [RollbarRegistry new];
+        self->_pendingSendOperations = [NSMutableArray array];
+        self->_pendingSendOperationsLock = [NSObject new];
 
 #if !TARGET_OS_WATCH
         self->_reachability = nil;
@@ -75,10 +78,19 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
 #endif
 
     }
-    
     [self start];
-    
     return self;
+}
+
+- (void)cancel {
+    [super cancel];
+    // Cancel all pending send operations
+    @synchronized (_pendingSendOperationsLock) {
+        for (id<RollbarCancellable> op in _pendingSendOperations) {
+            [op cancel];
+        }
+        [_pendingSendOperations removeAllObjects];
+    }
 }
 
 - (void)setupDataStorage {
@@ -390,7 +402,6 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
 #pragma mark - processing persisted payload items
 
 - (void)checkItems {
-    RBLog(@"Check items called");
     if (_timer) {
         [_timer invalidate];
         _timer = nil;
@@ -399,9 +410,7 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
         [NSThread exit];
         return;
     }
-    
     @autoreleasepool {
-        RBLog(@"Processing saved items...");
         [self processSavedItemsCompletion:^{
             if (self.cancelled) {
                 [NSThread exit];
@@ -445,11 +454,13 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
 }
 
 - (void)processSavedPayload:(nonnull NSDictionary<NSString *, NSString *> *)payloadDataRow callback:(nonnull void(^)())callback {
+    if (self.cancelled) {
+        return;
+    }
     if ([self checkProcessStalePayload:payloadDataRow]) {
         callback();
         return;
     }
-
     NSDictionary<NSString *, NSString *> *destination = [self->_payloadsRepo getDestinationByID:payloadDataRow[@"destination_key"]];
     RollbarDestinationRecord *destinationRecord = [self->_registry getRecordForEndpoint:destination[@"endpoint"]
                                                                          andAccessToken:destination[@"access_token"]];
@@ -485,14 +496,29 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
     }
 
     if (config.developerOptions.transmit) {
-        [self sendPayload:jsonPayload toDestination:destinationRecord withConfig:config callback:^(RollbarTriStateFlag result) {
-            [self handleSendPayloadResult:result
+        if (self.cancelled) {
+            return;
+        }
+        id<RollbarCancellable> sendOp = [[RollbarSender new] sendPayload:jsonPayload usingConfig:config completion:^(RollbarPayloadPostReply * _Nullable reply) {
+            if (self.cancelled) {
+                return;
+            }
+            [destinationRecord recordPostReply:reply withConfig:config];
+            [self handleSendPayloadResult:(reply ? (reply.statusCode == 200 ? RollbarTriStateFlag_On : RollbarTriStateFlag_Off) : RollbarTriStateFlag_None)
                                withConfig:config
                            payloadDataRow:payloadDataRow
                               jsonPayload:jsonPayload
                                   payload:payload];
+            @synchronized (_pendingSendOperationsLock) {
+                [_pendingSendOperations removeObject:sendOp];
+            }
             callback();
         }];
+        if (sendOp) {
+            @synchronized (_pendingSendOperationsLock) {
+                [_pendingSendOperations addObject:sendOp];
+            }
+        }
     } else {
         [self handleSendPayloadResult:RollbarTriStateFlag_On
                            withConfig:config
@@ -544,20 +570,24 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
 - (void)processSavedItemsCompletion:(void (^)())completion {
 #if !TARGET_OS_WATCH
     if (!self->_isNetworkReachable) {
-        RBLog(@"Processing saved items: no network!");
+        RBLog(@"Processing saved items: no network or cancelled!");
         // Don't attempt sending if the network is known to be not reachable
         return;
     }
 #endif
-
+    if (self.cancelled) return;
     NSArray *payloads = [self->_payloadsRepo getPayloadsWithOffset:0 andLimit:5];
     __block NSUInteger index = 0;
     __weak typeof(self) weakSelf = self;
-    __block void (^processNext)(); // __block for self-reference
+    __block void (^processNext)();
     processNext = ^{
+        if (weakSelf.cancelled) {
+            processNext = nil;
+            return;
+        } 
         if (index >= payloads.count) {
             completion();
-            processNext = nil; // clear the reference to avoid retain cycle
+            processNext = nil;
             return;
         }
         RBLog(@"Processing next payload: %ld", (long)index);

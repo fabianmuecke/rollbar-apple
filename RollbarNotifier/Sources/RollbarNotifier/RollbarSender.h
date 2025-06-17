@@ -12,9 +12,13 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+@protocol RollbarCancellable <NSObject>
+- (void)cancel;
+@end
+
 @interface RollbarSender : NSObject
 
-- (void)sendPayload:(nonnull NSData *)payload
+- (id<RollbarCancellable>)sendPayload:(nonnull NSData *)payload
         usingConfig:(nonnull RollbarConfig *)config
          completion:(void (^)(RollbarPayloadPostReply * _Nullable response))completion;
 @end

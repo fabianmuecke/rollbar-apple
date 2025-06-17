@@ -7,25 +7,33 @@
 #import "RollbarNotifierFiles.h"
 #import "RollbarInternalLogging.h"
 
+@interface NSURLSessionDataTask (RollbarCancellable) <RollbarCancellable>
+@end
+
+@implementation NSURLSessionDataTask (RollbarCancellable)
+// No additional implementation needed; NSURLSessionDataTask already implements -cancel
+@end
+
 @implementation RollbarSender
 
-- (void)sendPayload:(nonnull NSData *)payload
+- (id<RollbarCancellable>)sendPayload:(nonnull NSData *)payload
                                       usingConfig:(nonnull RollbarConfig *)config
                                        completion:(void (^)(RollbarPayloadPostReply * _Nullable response))completion
 {
     if (config.developerOptions.transmit) {
-        [self transmitPayload:payload
+        return [self transmitPayload:payload
                 toDestination:config.destination
         usingDeveloperOptions:config.developerOptions
          andHttpProxySettings:config.httpProxy
         andHttpsProxySettings:config.httpsProxy
                    completion:completion];
     } else {
-        completion([RollbarPayloadPostReply greenReply]); // we just successfully short-circuit here...
+        completion([RollbarPayloadPostReply greenReply]);
+        return nil;
     }
 }
 
-- (void)transmitPayload:(nonnull NSData *)payload
+- (id<RollbarCancellable>)transmitPayload:(nonnull NSData *)payload
           toDestination:(nonnull RollbarDestination  *)destination
   usingDeveloperOptions:(nullable RollbarDeveloperOptions *)developerOptions
    andHttpProxySettings:(nullable RollbarProxy *)httpProxySettings
@@ -41,7 +49,7 @@
     httpProxySettings = httpProxySettings ?: [RollbarProxy new];
     httpsProxySettings = httpsProxySettings ?: [RollbarProxy new];
 
-    [self postPayload:payload
+    return [self postPayload:payload
         toDestination:destination
 usingDeveloperOptions:developerOptions
  andHttpProxySettings:httpProxySettings
@@ -51,7 +59,7 @@ andHttpsProxySettings:httpsProxySettings
     }];
 }
 
-- (void)  postPayload:(nonnull NSData *)payload
+- (id<RollbarCancellable>)  postPayload:(nonnull NSData *)payload
         toDestination:(nonnull RollbarDestination  *)destination
 usingDeveloperOptions:(nonnull RollbarDeveloperOptions *)developerOptions
  andHttpProxySettings:(nonnull RollbarProxy *)httpProxySettings
@@ -105,6 +113,7 @@ andHttpsProxySettings:(nonnull RollbarProxy *)httpsProxySettings
     }];
 
     [dataTask resume];
+    return dataTask;
 }
 
 - (void)callCompletionOnOriginalThread:(NSDictionary *)args {
