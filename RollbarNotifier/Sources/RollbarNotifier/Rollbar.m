@@ -380,7 +380,7 @@ void uncaughtExceptionHandler(NSException * _Nonnull exception) {
 #pragma mark - Send manually constructed JSON payload
 
 + (void)sendJsonPayload:(NSData *)payload {
-    [[RollbarThread sharedInstance] sendPayload:payload withConfig:[Rollbar configuration]];
+    [[RollbarThread sharedInstance] sendPayload:payload withConfig:[Rollbar configuration] callback:^(RollbarTriStateFlag state) {}];
 }
 
 #pragma mark - Telemetry API

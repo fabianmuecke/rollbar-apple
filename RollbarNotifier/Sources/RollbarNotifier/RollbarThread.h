@@ -14,8 +14,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)persistPayload:(nonnull RollbarPayload *)payload
             withConfig:(nonnull RollbarConfig *)config;
 
-- (RollbarTriStateFlag)sendPayload:(nonnull NSData *)payload
-                        withConfig:(nonnull RollbarConfig *)config;
+- (void)sendPayload:(nonnull NSData *)payload
+                        withConfig:(nonnull RollbarConfig *)config
+                          callback:(void(^)(RollbarTriStateFlag))callback;
 
 - (instancetype)init NS_UNAVAILABLE;
 - (instancetype)initWithTarget:(id)target selector:(SEL)selector object:(nullable id)argument NS_UNAVAILABLE;
