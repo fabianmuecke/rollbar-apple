@@ -382,7 +382,7 @@ static int selectMultipleRowsCallback(void *info, int columns, char **data, char
                                                                           andLimit:(NSUInteger)limit {
 
     NSString *sql =
-    [NSString stringWithFormat:@"SELECT * FROM payloads LIMIT %lu OFFSET %lu",
+    [NSString stringWithFormat:@"SELECT * FROM payloads ORDER BY created_at ASC LIMIT %lu OFFSET %lu",
      (unsigned long)limit,
      (unsigned long)offset];
     

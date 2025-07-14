@@ -20,12 +20,11 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
 
 @implementation RollbarThread {
 @private
-    NSUInteger _maxReportsPerMinute;
     NSTimeInterval _payloadLifetimeInSeconds;
-    NSTimer *_timer;
     NSString *_payloadsRepoFilePath;
     RollbarRegistry *_registry;
     RollbarPayloadRepository *_payloadsRepo;
+    BOOL _processing;
     
 #if !TARGET_OS_WATCH
     RollbarReachability *_reachability;
@@ -44,11 +43,11 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
                           object:nil];
     if (self) {
         [self setupDataStorage];
-        self->_maxReportsPerMinute = 240;
         self->_payloadLifetimeInSeconds = DEFAULT_PAYLOAD_LIFETIME_SECONDS;
         self->_registry = [RollbarRegistry new];
         self->_pendingSendOperations = [NSMutableArray array];
         self->_pendingSendOperationsLock = [NSObject new];
+        self->_processing = NO;
 
 #if !TARGET_OS_WATCH
         self->_reachability = nil;
@@ -90,6 +89,7 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
             [op cancel];
         }
         [_pendingSendOperations removeAllObjects];
+        _processing = NO;
     }
 }
 
@@ -110,24 +110,15 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
 
 - (void)run {
     @autoreleasepool {
-        [self startTimer];
-        
         NSRunLoop *runLoop = [NSRunLoop currentRunLoop];
+        // Add dummy source to make sure runLoop pauses until woken up 
+        NSMachPort *dummyPort = [[NSMachPort alloc] init];
+        [runLoop addPort:dummyPort forMode:NSDefaultRunLoopMode];
         while (self.active) {
+            [self checkItems];
             [runLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]];
         }
     }
-}
-
-- (void)startTimer {
-    _timer = [NSTimer timerWithTimeInterval:60.0 / _maxReportsPerMinute
-                                     target:self
-                                   selector:@selector(checkItems)
-                                   userInfo:nil
-                                    repeats:NO];
-    
-    NSRunLoop *runLoop = [NSRunLoop currentRunLoop];
-    [runLoop addTimer:_timer forMode:NSDefaultRunLoopMode];
 }
 
 #pragma mark - persisting payload items
@@ -402,21 +393,19 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
 #pragma mark - processing persisted payload items
 
 - (void)checkItems {
-    if (_timer) {
-        [_timer invalidate];
-        _timer = nil;
-    }
     if (self.cancelled) {
         [NSThread exit];
         return;
     }
     @autoreleasepool {
+        if (self->_processing) return;
+        self->_processing = YES;
         [self processSavedItemsCompletion:^{
+            self->_processing = NO;
             if (self.cancelled) {
                 [NSThread exit];
                 return;
             }
-            [self startTimer];
         }];
     }
 }
@@ -576,7 +565,7 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
     }
 #endif
     if (self.cancelled) return;
-    NSArray *payloads = [self->_payloadsRepo getPayloadsWithOffset:0 andLimit:5];
+    __block NSArray *payloads = [self->_payloadsRepo getPayloadsWithOffset:0 andLimit:5];
     __block NSUInteger index = 0;
     __weak typeof(self) weakSelf = self;
     __block void (^processNext)();
@@ -586,9 +575,13 @@ static NSTimeInterval const DEFAULT_PAYLOAD_LIFETIME_SECONDS = 24 * 60 * 60;
             return;
         } 
         if (index >= payloads.count) {
-            completion();
-            processNext = nil;
-            return;
+            payloads = [self->_payloadsRepo getPayloadsWithOffset:0 andLimit:5];
+            index = 0;
+            if (index >= payloads.count) {
+                completion();
+                processNext = nil;
+                return;
+            }
         }
         RBLog(@"Processing next payload: %ld", (long)index);
         NSDictionary<NSString *, NSString *> *payload = payloads[index++];
