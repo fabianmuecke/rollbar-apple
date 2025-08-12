@@ -512,8 +512,10 @@ SYNTHESIZE_CRASH_STATE_PROPERTY(BOOL, crashedLastLaunch)
 
         NSDictionary *lastFrame = frames[frames.count - 1];
         NSDictionary *penultimateFrame = frames[frames.count - 2];
+        NSNumber *penultimateSymbolAddr = penultimateFrame[@RollbarCrashField_SymbolAddr];
 
-        if ([lastFrame[@RollbarCrashField_SymbolAddr] isEqualToNumber:penultimateFrame[@RollbarCrashField_SymbolAddr]]
+        if (penultimateSymbolAddr 
+            && [lastFrame[@RollbarCrashField_SymbolAddr] isEqualToNumber:penultimateSymbolAddr]
             && [penultimateFrame[@RollbarCrashField_InstructionAddr] isEqualToNumber:registers[@"lr"]])
         {
             [frames removeObjectAtIndex:frames.count - 2];
